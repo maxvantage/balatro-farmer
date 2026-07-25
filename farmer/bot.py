@@ -41,7 +41,6 @@ from .vision import (
     PackGeometry,
     SoulFinder,
     annotate,
-    find_use_button,
     grab,
     identify_pack,
 )
@@ -107,12 +106,25 @@ class PackScan:
         return None
 
     @property
+    def max_soul_score(self) -> float:
+        """Best Soul correlation over all slots, whoever won each slot."""
+        return max((s.soul_score for s in self.slots if s), default=0.0)
+
+    @property
+    def best_soul_slot(self) -> int | None:
+        """Slot the Soul matched best, used when only the score signal fires."""
+        scored = [(s.soul_score, i) for i, s in enumerate(self.slots) if s]
+        return max(scored)[1] if scored else None
+
+    @property
     def template_score(self) -> float:
         return self.match.score if self.match else 0.0
 
     def soul_point(self, rect: Rect) -> tuple[int, int]:
-        """Where to click for The Soul: the slot box if named, else the match."""
+        """Where to click for The Soul, preferring the identified slot box."""
         idx = self.soul_slot
+        if idx is None:
+            idx = self.best_soul_slot
         if idx is not None and idx < len(self.boxes):
             x, y, w, h = self.boxes[idx]
             return (rect.left + x + w // 2, rect.top + y + h // 2)
@@ -195,6 +207,7 @@ class Farmer:
             card_height_frac=float(det["card_height_frac"]),
             scale_tolerance=float(det["scale_tolerance"]),
             card_brightness=int(det["card_brightness"]),
+            match_scale=float(det["match_scale"]),
         )
         self.finder = SoulFinder(self.geometry, threshold=float(det["threshold"]))
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -269,15 +282,19 @@ class Farmer:
         predicate: Callable[[RunState], bool],
         what: str,
         attempts: int = 3,
-        timeout: float = 4.0,
+        timeout: float | None = None,
     ) -> RunState:
         """Click, confirm the game state actually changed, and retry if not.
 
-        A blind-select click occasionally lands while the panels are still sliding
-        in and is swallowed. Verifying against the save file and retrying makes each
-        skip self-healing, which matters over thousands of unattended iterations --
-        the alternative was the whole run aborting on one dropped click.
+        The first live run needed a retry on *every single* skip click -- all 298,
+        always succeeding on the second attempt. That looked like dropped clicks, but
+        measuring it showed the truth: a skip takes **3.7-4.2s** to reach save.jkr
+        (the tag animation blocks the event queue before ``save_run`` fires), and the
+        wait was simply too short. So the timeout is generous and the retry is what
+        it should have been all along -- a genuine safety net, not the normal path.
         """
+        if timeout is None:
+            timeout = float(self.cfg["timeouts"]["skip_confirm"])
         last: Stop | None = None
         for attempt in range(attempts):
             self.click_norm(*coord)
@@ -375,9 +392,19 @@ class Farmer:
             )
 
     def _read_pack(self, rect: Rect) -> PackScan:
+        """One frame's read. The sliding template search is deliberately skipped.
+
+        Identification already yields a per-slot Soul correlation for free, which is
+        the cheap second signal; the sliding search costs ~1s a frame and is run only
+        to confirm an actual candidate (see ``_confirm_soul``).
+        """
         frame = grab(rect)
         slots, boxes = identify_pack(frame, self.geometry)
-        scan = PackScan(frame, slots, boxes, self.finder.search(frame), ready=False)
+        return PackScan(frame, slots, boxes, None, ready=False)
+
+    def _confirm_soul(self, scan: PackScan) -> PackScan:
+        """Run the independent sliding search on a Soul candidate."""
+        scan.match = self.finder.search(scan.frame)
         return scan
 
     def _legible(self, scan: PackScan) -> bool:
@@ -422,11 +449,23 @@ class Farmer:
         frames = 0
         ready = False
 
+        soul_floor = float(self.cfg["detector"]["soul_score_threshold"])
+
         def consider(scan: PackScan) -> None:
             nonlocal cleanest, soul_scan
             if cleanest is None or scan.mean_score > cleanest.mean_score:
                 cleanest = scan
-            if soul_scan is None and scan.soul_slot is not None:
+            # Only a legible frame may nominate a Soul. Without this, a
+            # mid-materialize frame where just one box was found and c_soul won on
+            # noise (score 0.333, below the floor) reported a Soul -- two false
+            # positives in 18 resets. A frame we would not trust to read the pack is
+            # not a frame we should trust to spot the Soul.
+            if not self._legible(scan):
+                return
+            candidate = scan.soul_slot is not None or scan.max_soul_score >= soul_floor
+            if candidate and (
+                soul_scan is None or scan.max_soul_score > soul_scan.max_soul_score
+            ):
                 soul_scan = scan
 
         deadline = time.time() + timeout
@@ -455,6 +494,7 @@ class Farmer:
         cleanest.ready = ready
         if soul_scan is not None:
             soul_scan.ready = ready
+            self._confirm_soul(soul_scan)
         return cleanest, soul_scan, frames
 
     def save_pack_shot(self, seed: str, scan: PackScan, *, full_res: bool) -> Path:
@@ -466,6 +506,11 @@ class Farmer:
         eye. Anything interesting -- a Soul, or a pack the reader was unsure about
         -- is kept at full resolution instead, and those are rare.
         """
+        if full_res:
+            # Keep an unannotated copy too: the overlays draw over the cards, which
+            # would spoil the frame as evidence (and as a future template source).
+            cv2.imwrite(str(PACK_DIR / f"{seed}_clean.png"), scan.frame)
+
         marked = annotate(
             scan.frame, scan.match, label=seed, geometry=self.geometry
         )
@@ -510,7 +555,7 @@ class Farmer:
         time.sleep(0.45)
         cv2.imwrite(str(PACK_DIR / f"{seed}_selected.png"), grab(rect))
 
-        self._click_use(rect, cx, cy, seed)
+        self._click_use(rect, cx, cy)
         time.sleep(0.6)
         cv2.imwrite(str(PACK_DIR / f"{seed}_used.png"), grab(rect))
 
@@ -532,32 +577,39 @@ class Farmer:
                 return SoulOutcome(False, state.joker_keys, True)
 
             elapsed = time.time() - started
-            # If the first USE click missed, the card is still selected and the
-            # button is still there, so one retry is worth it before giving up.
-            if not retried_use and elapsed > 2.0:
+            # Retry only after the save could plausibly have landed. Firing at 2s
+            # meant every single Soul logged a spurious retry, because a run save
+            # takes ~4s to appear. The card is re-selected first in case the original
+            # selection was what failed.
+            if not retried_use and elapsed > float(self.cfg["timeouts"]["use_retry"]):
                 self.log(event="use_retry", seed=seed)
-                self._click_use(rect, cx, cy, seed)
+                click_screen(cx, cy, rect)
+                time.sleep(0.4)
+                self._click_use(rect, cx, cy)
                 retried_use = True
             # Closing the pack forces save_run(), which reveals the new Joker even
             # when it is one already discovered.
-            elif not closed_pack and pack_skip is not None and elapsed > 5.0:
+            elif not closed_pack and pack_skip is not None and elapsed > 8.0:
                 self.click_norm(*pack_skip)
                 closed_pack = True
             time.sleep(float(self.cfg["poll_interval"]))
 
         return SoulOutcome(self.meta.has_target(self.target), jokers, False)
 
-    def _click_use(self, rect: Rect, cx: int, cy: int, seed: str) -> None:
-        """Click the red USE button, locating it by colour with an offset fallback."""
-        spot = find_use_button(grab(rect), self.geometry)
-        if spot is not None:
-            ux, uy = rect.left + spot[0], rect.top + spot[1]
-        else:
-            dx, dy = self.cfg.coord("use_button_offset") or (0.0, 0.082)
-            ux = cx + int(dx * rect.width)
-            uy = cy + int(dy * rect.height)
-            self.log(event="use_button_fallback", seed=seed, x=ux, y=uy)
-        click_screen(ux, uy, rect)
+    def _click_use(self, rect: Rect, cx: int, cy: int) -> None:
+        """Click the USE button, at a fixed offset below the selected card.
+
+        Deliberately geometric rather than vision-based. Detecting the button by
+        colour bought nothing: the Soul is *detected* entirely from the card row, so
+        the button only matters for the click that follows -- and the calibrated
+        offset has landed within 7-10px of the button centre on every real Soul so
+        far, against a button roughly 106x70px.
+
+        Selecting a card raises it, and this offset is calibrated against that raised
+        position, which is why it is measured from the card rather than the button.
+        """
+        dx, dy = self.cfg.coord("use_button_offset") or (0.0, 0.082)
+        click_screen(cx + int(dx * rect.width), cy + int(dy * rect.height), rect)
 
     # -- modes -------------------------------------------------------------
 
@@ -653,22 +705,29 @@ class Farmer:
         cleanest, soul_scan, frames = self.scan_pack()
         scan = soul_scan or cleanest
 
-        # Two independent signals. Naming the card is a relative choice among 23
-        # candidates and does not depend on a tuned cutoff, so it leads; the
-        # template threshold stays as a backstop. The name vote counts a hit on any
-        # sampled frame, since the cards are never still.
-        by_name = soul_scan is not None
+        # Three signals, any of which is enough (a false positive merely halts the
+        # bot; a miss silently costs ~500 resets):
+        #   name     - the Soul won its slot outright against the other 22 candidates
+        #   score    - Soul correlation cleared an absolute floor (tarots <=0.35,
+        #              a real Soul >=0.87)
+        #   template - independent sliding search, run only on candidates
+        soul_floor = float(self.cfg["detector"]["soul_score_threshold"])
+        by_name = scan.soul_slot is not None
+        by_score = scan.max_soul_score >= soul_floor
         by_template = scan.template_score >= self.finder.threshold
-        soul = by_name or by_template
-        suspicious = (not cleanest.ready) or (by_name != by_template)
+        soul = by_name or by_score or by_template
+        # Flag when the cards were unsettled, or when the two cheap signals split.
+        suspicious = (not cleanest.ready) or (by_name != by_score)
 
         self.stats.cards_seen.extend(
             s.key for s in scan.slots if s and not s.is_soul
         )
         shot = self.save_pack_shot(state.seed, scan, full_res=soul or suspicious)
         print(f"        pack: {', '.join(scan.names)}")
-        print(f"        soul: name={by_name} template={scan.template_score:.3f}"
-              f"/{self.finder.threshold:.2f} | slots mean {cleanest.mean_score:.2f}"
+        print(f"        soul: name={by_name} score={scan.max_soul_score:.3f}"
+              f"/{soul_floor:.2f}"
+              + (f" template={scan.template_score:.3f}" if scan.match else "")
+              + f" | slots mean {cleanest.mean_score:.2f}"
               f" worst {cleanest.min_score:.2f} over {frames} frames"
               f"{'' if cleanest.ready else '  [NOT SETTLED]'}")
         self.log(
@@ -676,11 +735,14 @@ class Farmer:
             seed=state.seed,
             cards=[s.key if s else None for s in scan.slots],
             scores=[round(s.score, 3) if s else None for s in scan.slots],
+            soul_scores=[round(s.soul_score, 3) if s else None for s in scan.slots],
             mean_score=round(cleanest.mean_score, 3),
             min_score=round(cleanest.min_score, 3),
+            max_soul_score=round(scan.max_soul_score, 3),
             frames=frames,
-            template_score=round(scan.template_score, 3),
+            template_score=round(scan.template_score, 3) if scan.match else None,
             soul_by_name=by_name,
+            soul_by_score=by_score,
             soul_by_template=by_template,
             ready=cleanest.ready,
             suspicious=suspicious,

@@ -8,9 +8,12 @@
     "new_run": 20.0,
     "ui_settle": 0.35,
     "refocus": 120.0,
-    "blind_state_change": 8.0,
+    "_skip_confirm_note": "A skip click takes a measured 3.7-4.2s to reach save.jkr; the tag animation blocks the event queue before save_run fires. Anything tighter makes a retry the normal path rather than the exception.",
+    "skip_confirm": 9.0,
+    "blind_state_change": 9.0,
     "pack_ready": 12.0,
-    "soul_resolved": 12.0
+    "use_retry": 5.5,
+    "soul_resolved": 16.0
   },
 
   "_pack_note": "Two separate animations matter here. (1) A pack tears open and materializes cards with a dissolve shader; such a frame has 5 card-sized blobs scoring 0.08-0.22, so blob count alone is not readiness. (2) Every card carries a permanent ambient_tilt that Card:draw recomputes each frame, so even settled cards never hold still -- one slot measured 0.285-0.748 across 40 frames, and detected boxes wandered up to 111px. Hence a MEAN gate (settled 0.60-0.74 vs unsettled ~0.13) plus a per-slot floor above the unsettled ceiling of 0.216. scan_frames is generous because the Soul verdict is taken across every frame sampled.",
@@ -23,13 +26,15 @@
   },
 
   "_detector_note": "Scale is derived from window height via card_height_frac, not swept: at 2560x1599 the cards render 1.58x the template's native size. region confines the search to the card row; searching the whole window scored 0.46 on the animated backdrop.",
-  "_threshold_note": "Set from measured data, biased toward recall. Real Soul-free packs scored 0.235/0.271/0.339; the Soul composited into real frames scored 0.722-0.844. 0.55 sits near the midpoint. The asymmetry matters: a missed Soul silently costs ~500 resets, while a false positive just stops the bot with screenshots.",
+  "_soul_threshold_note": "soul_score_threshold gates the absolute Soul correlation produced per slot by identification. Measured with the composite bank: slots holding tarots score <=0.347, a real Soul >=0.874. 0.60 sits in that 0.53-wide gap. The first run proved why this matters: with a single flat template the real Souls scored only 0.448/0.520 and the old 0.55 template threshold missed BOTH -- only the argmax signal caught them.",
   "detector": {
-    "threshold": 0.55,
+    "threshold": 0.5,
+    "soul_score_threshold": 0.6,
     "region": [0.27, 0.57, 0.83, 0.86],
     "card_height_frac": 0.1882,
     "scale_tolerance": 0.18,
-    "card_brightness": 175
+    "card_brightness": 175,
+    "match_scale": 0.5
   },
 
   "_coords_note": "Normalized (0..1) positions within the Balatro CLIENT rect, so they survive a resize. Measured live at 2560x1599 via tools/calibrate.py.",

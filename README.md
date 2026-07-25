@@ -40,6 +40,33 @@ Three things about that step only became clear from real screenshots:
   scaling the padding in distorted the aspect ratio (0.747 vs 0.681 as rendered)
   and capped match scores near 0.70. Cropping to the opaque bounds fixed it.
 
+### The Soul is not one sprite
+
+This is the finding that mattered most, and only a real Soul exposed it. The Soul
+renders as **two** layers: its atlas cell `Tarots(2,2)`, plus `G.shared_soul` =
+`Enhancers(0,1)` (a white pearl) drawn through a dissolve shader with continuously
+animated scale *and rotation*:
+
+```lua
+scale_mod  = 0.05 + 0.05*sin(1.8T) + 0.07*sin(frac(T)*pi*14)*(1-frac(T))^3
+rotate_mod = 0.1*sin(1.219T) + 0.07*sin(T*pi*5)*(1-frac(T))^2
+```
+
+Scale spans ~0–0.17, rotation ±0.17 rad (≈±10°). A flat single template misses the
+overlay that visually dominates the card. On the first live run, two real Souls
+scored **0.448 and 0.520** on the template matcher — below its 0.55 threshold, so
+that signal **missed both**, and only the argmax signal caught them.
+
+The fix is a bank of 10 composites (5 rotations × 2 scales) covering the animation,
+matched with max-over-bank. Measured on a real Soul afterwards: **0.857**
+identification, **0.789** template — both signals now fire, and agree.
+
+| | flat template | composite bank |
+|---|---|---|
+| Real Souls (live) | 0.448 / 0.520 | **0.857** |
+| Animated Souls (measured) | 0.537–0.593 | **0.908–0.920** |
+| Soul-free slots | — | ≤0.347 |
+
 ### The cards never hold still
 
 Every card sets `ambient_tilt = 0.2`, and `Card:draw` recomputes a shader tilt each
@@ -140,13 +167,22 @@ tarots turned up, soul outcomes, and an **integrity** section.
 
 ### Not missing a Soul
 
-Two independent signals decide, and either one firing is treated as a Soul (a false
-positive just halts the bot; a missed Soul silently costs ~500 resets):
+Three signals decide, and any one firing is treated as a Soul (a false positive just
+halts the bot; a missed Soul silently costs ~500 resets). All three read the card
+row — **none of them involve the USE button**, which only matters for the click
+*after* detection:
 
-1. **Identification** — each card is named against the 23 things a Mega Arcana Pack
-   can contain. The Soul wins its slot by a margin of 0.50–0.66, so this is a
-   relative decision that does not depend on a tuned cutoff.
-2. **Template match** — the original absolute threshold, kept as a backstop.
+1. **Identification (primary)** — each card is named against the 23 things a Mega
+   Arcana Pack can contain. The Soul wins its slot by 0.50–0.66, a relative decision
+   that does not depend on a tuned cutoff.
+2. **Absolute Soul score** — free from the same pass. Tarot slots score ≤0.347, a
+   real Soul ≥0.874, so the 0.60 floor sits in a 0.53-wide gap.
+3. **Sliding template search** — fully independent, and expensive, so it runs only
+   to confirm a candidate rather than on every frame.
+
+Only a frame that is itself legible may nominate a Soul. Without that rule, a
+mid-materialize frame where one box was found and `c_soul` won on noise produced two
+false positives in 18 resets.
 
 A pack is **flagged for audit** if the cards had not finished materializing or if
 the two signals disagreed. Flagged packs and Souls are kept at full resolution;
@@ -192,6 +228,18 @@ The threshold is biased toward recall on purpose: a missed Soul silently costs
 ~500 resets, while a false positive just halts the bot with screenshots. Every
 Charm pack is saved to `logs/packs/` so the whole run can be audited by eye
 afterwards.
+
+## Results so far
+
+First real run: **1,561 resets over ~3 hours, 199 Charm packs, 2 Souls** — which
+rolled Perkeo and Triboulet, both already owned (each Soul is 1-in-5 for Yorick, so
+missing twice is a 64% outcome). Charm rate 12.7% against a 12.9% prediction.
+
+That run also produced the evidence for every fix above: the two-layer Soul sprite,
+and the discovery that **every single skip click was retrying** — all 298 of them,
+always succeeding on the second attempt. Measurement showed why: a skip takes
+**3.7–4.2 s** to reach `save.jkr` (the tag animation blocks the event queue before
+`save_run` fires), and the confirmation timeout was simply shorter than that.
 
 ## Safety notes
 

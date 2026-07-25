@@ -51,10 +51,16 @@ class Card:
     row: int
     card_set: str
     art: np.ndarray  # BGR, cropped to the opaque art bounds
+    variants: tuple = ()  # extra appearances to match against, if any
 
     @property
     def is_soul(self) -> bool:
         return self.key == "c_soul"
+
+    @property
+    def all_art(self) -> tuple:
+        """Every appearance to score this card against."""
+        return self.variants or (self.art,)
 
 
 @dataclass(frozen=True)
@@ -66,6 +72,10 @@ class SlotID:
     score: float
     runner_up: str
     runner_up_score: float
+    # How well The Soul matched this slot regardless of who won. Free from the same
+    # pass, and it gives a second, absolute-threshold signal alongside the argmax
+    # one. Measured separation: tarot slots <=0.347, a real Soul >=0.874.
+    soul_score: float = 0.0
 
     @property
     def margin(self) -> float:
@@ -99,17 +109,69 @@ def _crop_to_art(cell: np.ndarray) -> np.ndarray:
     return cell
 
 
+# --- The Soul's animated overlay ----------------------------------------
+#
+# The Soul does not render as a single atlas cell. card.lua draws Tarots(2,2) and
+# then G.shared_soul = Enhancers(0,1) on top, through a dissolve shader with
+# continuously animated scale and rotation:
+#
+#   scale_mod  = 0.05 + 0.05*sin(1.8T) + 0.07*sin(frac(T)*pi*14)*(1-frac(T))^3
+#   rotate_mod = 0.1*sin(1.219T) + 0.07*sin(T*pi*5)*(1-frac(T))^2
+#
+# so scale spans ~0..0.17 and rotation ~+/-0.17 rad (about +/-10 degrees). A single
+# flat template misses the overlay entirely: the two Souls found on the first real
+# run scored only 0.503/0.529 on identification and 0.448/0.520 on the template
+# matcher -- the latter below its threshold, so that signal missed both. Matching
+# against a bank of composites covering the animation lifts this to ~0.83-0.94.
+OVERLAY_ATLAS = "resources/textures/{scale}x/Enhancers.png"
+OVERLAY_COL, OVERLAY_ROW = 0, 1  # P_CENTERS.soul.pos
+
+# 5 rotations x 2 scales measured as the point of diminishing returns: worst-case
+# score 0.834 vs 0.877 for a 36-variant bank costing 3.5x the time.
+_SOUL_ROTATIONS = (-0.17, -0.085, 0.0, 0.085, 0.17)
+_SOUL_SCALES = (0.03, 0.13)
+
+
+def _composite_soul(bg: np.ndarray, overlay: np.ndarray, scale_mod: float,
+                    rotate_mod: float) -> np.ndarray:
+    """Draw the overlay onto the card background, scaled and rotated about centre."""
+    h, w = bg.shape[:2]
+    matrix = cv2.getRotationMatrix2D((w / 2, h / 2), np.degrees(rotate_mod), 1 + scale_mod)
+    warped = cv2.warpAffine(
+        overlay, matrix, (w, h), flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0),
+    )
+    alpha = warped[:, :, 3:4].astype(float) / 255.0
+    out = bg.copy()
+    out[:, :, :3] = (
+        warped[:, :, :3].astype(float) * alpha + bg[:, :, :3].astype(float) * (1 - alpha)
+    ).astype(np.uint8)
+    return out
+
+
 @lru_cache(maxsize=4)
 def load_catalog(scale: int = 2, exe: Path = BALATRO_EXE) -> tuple[Card, ...]:
-    """Every consumable sprite in Tarots.png, keyed and named from game.lua."""
+    """Every consumable sprite in Tarots.png, keyed and named from game.lua.
+
+    The Soul additionally gets a bank of composites covering its animated overlay.
+    """
     with zipfile.ZipFile(exe) as z:
         lua = z.read("game.lua").decode("utf-8", "replace")
         atlas = cv2.imdecode(
             np.frombuffer(z.read(ATLAS.format(scale=scale)), np.uint8),
             cv2.IMREAD_UNCHANGED,
         )
+        overlay_atlas = cv2.imdecode(
+            np.frombuffer(z.read(OVERLAY_ATLAS.format(scale=scale)), np.uint8),
+            cv2.IMREAD_UNCHANGED,
+        )
 
     ch, cw = atlas.shape[0] // GRID_ROWS, atlas.shape[1] // GRID_COLS
+    overlay = overlay_atlas[
+        OVERLAY_ROW * ch : (OVERLAY_ROW + 1) * ch,
+        OVERLAY_COL * cw : (OVERLAY_COL + 1) * cw,
+    ]
+
     cards: list[Card] = []
     for match in _DEF.finditer(lua):
         key, body = match.group(1), match.group(2)
@@ -120,10 +182,27 @@ def load_catalog(scale: int = 2, exe: Path = BALATRO_EXE) -> tuple[Card, ...]:
             continue
         col, row = int(pos.group(1)), int(pos.group(2))
         cell = atlas[row * ch : (row + 1) * ch, col * cw : (col + 1) * cw]
+
+        variants: tuple = ()
+        if key == "c_soul":
+            variants = tuple(
+                _crop_to_art(_composite_soul(cell, overlay, s, r))
+                for r in _SOUL_ROTATIONS
+                for s in _SOUL_SCALES
+            )
         cards.append(
-            Card(key, name.group(1), col, row, card_set.group(1), _crop_to_art(cell))
+            Card(key, name.group(1), col, row, card_set.group(1),
+                 _crop_to_art(cell), variants)
         )
     return tuple(cards)
+
+
+def soul_variants(scale: int = 2) -> tuple:
+    """The Soul's composite appearances, for the standalone template matcher."""
+    for card in load_catalog(scale):
+        if card.is_soul:
+            return card.all_art
+    raise LookupError("c_soul not found in the catalogue")
 
 
 def ARCANA_POOL(scale: int = 2) -> tuple[Card, ...]:
@@ -144,6 +223,7 @@ def identify_slot(
     box: tuple[int, int, int, int],
     pool: tuple[Card, ...],
     pad_frac: float = 0.09,
+    match_scale: float = 0.5,
 ) -> SlotID | None:
     """Name the card in one slot by best correlation across the pool.
 
@@ -166,12 +246,26 @@ def identify_slot(
     if tw < 8 or th < 8 or region.shape[0] < th or region.shape[1] < tw:
         return None
 
+    # Match at reduced resolution: 4x faster with no measured loss of accuracy
+    # (worst correct score actually improved slightly, 0.615 -> 0.656), which
+    # matters because this runs on 8 frames per pack against a 23-card pool.
+    if match_scale != 1.0:
+        region = cv2.resize(region, None, fx=match_scale, fy=match_scale,
+                            interpolation=cv2.INTER_AREA)
+        tw, th = max(8, int(tw * match_scale)), max(8, int(th * match_scale))
+        if region.shape[0] < th or region.shape[1] < tw:
+            return None
+
     scored: list[tuple[float, Card]] = []
     for card in pool:
-        art = cv2.resize(_inset(card.art), (tw, th), interpolation=cv2.INTER_AREA)
-        result = cv2.matchTemplate(region, art, cv2.TM_CCOEFF_NORMED)
-        scored.append((float(result.max()), card))
+        best = -1.0
+        for appearance in card.all_art:
+            art = cv2.resize(_inset(appearance), (tw, th), interpolation=cv2.INTER_AREA)
+            result = cv2.matchTemplate(region, art, cv2.TM_CCOEFF_NORMED)
+            best = max(best, float(result.max()))
+        scored.append((best, card))
 
+    soul_score = next((s for s, c in scored if c.is_soul), 0.0)
     scored.sort(key=lambda s: -s[0])
     (best_score, best), (second_score, second) = scored[0], scored[1]
-    return SlotID(best.key, best.name, best_score, second.name, second_score)
+    return SlotID(best.key, best.name, best_score, second.name, second_score, soul_score)

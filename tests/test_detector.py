@@ -14,6 +14,7 @@ Run:  .venv/Scripts/python.exe tests/test_detector.py
 
 from __future__ import annotations
 
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -24,11 +25,16 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from farmer.cards import ARCANA_POOL  # noqa: E402
 from farmer.vision import PackGeometry, SoulFinder, count_cards  # noqa: E402
 from tools.extract_soul_template import BALATRO_EXE, GRID_COLS, GRID_ROWS  # noqa: E402
 
-SOUL_CELL = (2, 2)
 DECOY_CELLS = [(0, 0), (1, 0), (3, 0), (4, 0), (5, 0), (6, 0), (0, 1), (3, 1)]
+
+# The Soul renders as its atlas cell PLUS an animated overlay, so the positive case
+# must use a composite from the bank -- a flat cell is an unrealistically easy
+# target, which is exactly what hid the bug the first live run exposed.
+SOUL_ART = next(c for c in ARCANA_POOL() if c.is_soul).all_art[4]
 
 # Window sizes to exercise: 720p-ish, Matt's old reported size, 1200p, his actual.
 WINDOWS = [(1280, 800), (1463, 914), (1920, 1200), (2560, 1599)]
@@ -75,7 +81,8 @@ def build_pack(atlas, geom: PackGeometry, size, soul_slot, seed=0):
     decoys = [DECOY_CELLS[i % len(DECOY_CELLS)] for i in rng.permutation(5)]
     soul_center = None
     for i in range(5):
-        art = cell(atlas, *SOUL_CELL) if i == soul_slot else cell(atlas, *decoys[i])
+        art = SOUL_ART if i == soul_slot else cell(atlas, *decoys[i])
+        art = art[:, :, :3] if art.shape[2] == 4 else art
         card = cv2.resize(art, (card_w, card_h), interpolation=cv2.INTER_AREA)
         x = x0 + i * (card_w + gap)
         img[y0 : y0 + card_h, x : x + card_w] = card
@@ -87,7 +94,8 @@ def build_pack(atlas, geom: PackGeometry, size, soul_slot, seed=0):
 def main() -> int:
     atlas = load_atlas()
     geom = PackGeometry()
-    finder = SoulFinder(geom)
+    cfg = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+    finder = SoulFinder(geom, threshold=float(cfg["detector"]["threshold"]))
     failures: list[str] = []
 
     print(f"threshold {finder.threshold}\n")

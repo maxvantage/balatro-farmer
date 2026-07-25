@@ -91,12 +91,17 @@ def main() -> int:
             why = []
             if not e.get("ready"):
                 why.append("cards not settled")
-            if e.get("soul_by_name") != e.get("soul_by_template"):
-                why.append("signals disagreed")
-            print(f"  {e['seed']}  {', '.join(why)}")
-            print(f"    cards: {', '.join(pretty_card(c) for c in e.get('cards') or [])}")
-            print(f"    scores: {e.get('scores')}  template={e.get('template_score')}")
-            print(f"    shot: {PACK_DIR / (e['seed'] + '.png')}\n")
+            if e.get("soul_by_name") != e.get("soul_by_score", e.get("soul_by_template")):
+                why.append("soul signals disagreed")
+            print(f"  {e['seed']}  {', '.join(why) or 'flagged'}")
+            print(f"    cards:  {', '.join(pretty_card(c) for c in e.get('cards') or [])}")
+            print(f"    scores: {e.get('scores')}")
+            if e.get("soul_scores") is not None:
+                print(f"    soul:   {e.get('soul_scores')}  "
+                      f"max={e.get('max_soul_score')}  template={e.get('template_score')}")
+            else:
+                print(f"    template={e.get('template_score')}")
+            print(f"    shot:   {PACK_DIR / (e['seed'] + '.png')}\n")
         return 0
 
     # -- timing ----------------------------------------------------------

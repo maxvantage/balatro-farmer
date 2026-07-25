@@ -38,7 +38,6 @@ __all__ = [
     "count_cards",
     "find_card_slots",
     "identify_pack",
-    "find_use_button",
 ]
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
@@ -66,6 +65,8 @@ class PackGeometry:
     card_height_frac: float = 0.1882
     scale_tolerance: float = 0.18
     card_brightness: int = 175
+    # Identification matches at reduced resolution: 4x faster, no accuracy loss.
+    match_scale: float = 0.5
 
     def pixel_region(self, width: int, height: int) -> tuple[int, int, int, int]:
         x0, y0, x1, y1 = self.region
@@ -101,50 +102,43 @@ def grab(rect: Rect) -> np.ndarray:
     return cv2.cvtColor(np.asarray(shot), cv2.COLOR_BGRA2BGR)
 
 
-def _load_template(path: Path) -> np.ndarray:
-    """Load the Soul sprite, cropped to its art and inset.
-
-    The atlas cell is 142x190 but the card art only occupies 126x186 of it -- the
-    rest is transparent padding. Scaling the padded cell distorts the aspect ratio
-    (0.747 padded vs 0.681 as actually rendered), which capped match scores near
-    0.70. Cropping to the opaque bounds first fixes the aspect and lifts them well
-    clear of the threshold.
-    """
-    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-    if img is None:
-        raise FileNotFoundError(
-            f"missing template {path} -- run tools/extract_soul_template.py first"
-        )
+def _inset_art(img: np.ndarray) -> np.ndarray:
+    """Drop alpha and inset past the drawn border and rounded corners."""
     if img.shape[2] == 4:
-        alpha = img[:, :, 3]
-        ys, xs = np.where(alpha > 10)
-        if len(xs):
-            img = img[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
         img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-
-    # Inset past the drawn border and rounded corners, which the game redraws.
     h, w = img.shape[:2]
     dx, dy = int(w * _INSET), int(h * _INSET)
     return img[dy : h - dy, dx : w - dx]
 
 
 class SoulFinder:
+    """Sliding-window search for The Soul across the pack region.
+
+    Matches against the whole bank of animated composites (see ``cards``), because
+    the plain atlas cell misses the overlay that dominates the rendered card. This
+    is the backstop signal; per-slot identification is the primary one.
+    """
+
     def __init__(
         self,
         geometry: PackGeometry | None = None,
-        threshold: float = 0.62,
-        template_path: Path | None = None,
-        scale_steps: int = 9,
+        threshold: float = 0.50,
+        templates: tuple | None = None,
+        scale_steps: int = 3,
     ) -> None:
+        from .cards import soul_variants  # local: avoids an import cycle
+
         self.geometry = geometry or PackGeometry()
-        self.template = _load_template(template_path or ASSETS / "soul_2x.png")
+        self.templates = tuple(
+            _inset_art(t) for t in (templates or soul_variants())
+        )
         self.threshold = threshold
         self.scale_steps = scale_steps
 
     def scales_for(self, frame_height: int) -> np.ndarray:
         """Scale factors to try, centred on the geometry's implied card size."""
         _, card_h = self.geometry.card_size(frame_height)
-        implied = (card_h * (1 - 2 * _INSET)) / self.template.shape[0]
+        implied = (card_h * (1 - 2 * _INSET)) / self.templates[0].shape[0]
         tol = self.geometry.scale_tolerance
         return np.linspace(implied * (1 - tol), implied * (1 + tol), self.scale_steps)
 
@@ -157,22 +151,23 @@ class SoulFinder:
             return None
 
         best: Match | None = None
-        th, tw = self.template.shape[:2]
         rh, rw = roi.shape[:2]
         for scale in self.scales_for(ih):
-            w, h = int(tw * scale), int(th * scale)
-            if w < 12 or h < 12 or w > rw or h > rh:
-                continue
-            resized = cv2.resize(self.template, (w, h), interpolation=cv2.INTER_AREA)
-            result = cv2.matchTemplate(roi, resized, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(result)
-            if best is None or max_val > best.score:
-                best = Match(
-                    score=float(max_val),
-                    center=(x0 + max_loc[0] + w // 2, y0 + max_loc[1] + h // 2),
-                    scale=float(scale),
-                    size=(w, h),
-                )
+            for template in self.templates:
+                th, tw = template.shape[:2]
+                w, h = int(tw * scale), int(th * scale)
+                if w < 12 or h < 12 or w > rw or h > rh:
+                    continue
+                resized = cv2.resize(template, (w, h), interpolation=cv2.INTER_AREA)
+                result = cv2.matchTemplate(roi, resized, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                if best is None or max_val > best.score:
+                    best = Match(
+                        score=float(max_val),
+                        center=(x0 + max_loc[0] + w // 2, y0 + max_loc[1] + h // 2),
+                        scale=float(scale),
+                        size=(w, h),
+                    )
         return best
 
     def find(self, image: np.ndarray) -> Match | None:
@@ -236,38 +231,10 @@ def identify_pack(image: np.ndarray, geometry: PackGeometry | None = None):
     geom = geometry or PackGeometry()
     boxes = find_card_slots(image, geom)
     pool = ARCANA_POOL()
-    slots = [identify_slot(image, box, pool) for box in boxes]
+    slots = [
+        identify_slot(image, box, pool, match_scale=geom.match_scale) for box in boxes
+    ]
     return slots, boxes
-
-
-def find_use_button(image: np.ndarray, geometry: PackGeometry | None = None):
-    """Centre of the red USE button, or None.
-
-    Clicking a pack card raises it and puts a small red USE button at its lower
-    edge. Locating that button by colour is far sturdier than clicking a fixed
-    offset from the card, and this is the one moment in the whole run that has to
-    work -- a missed Soul costs ~500 resets.
-    """
-    geom = geometry or PackGeometry()
-    ih, iw = image.shape[:2]
-    x0, y0, x1, y1 = geom.pixel_region(iw, ih)
-    # The button can sit just below the card row, so extend the band downward.
-    y1 = min(ih, int(y1 + 0.06 * ih))
-    roi = image[y0:y1, x0:x1].astype(int)
-
-    b, g, r = cv2.split(roi)
-    mask = ((r > 200) & (g > 40) & (g < 130) & (b > 30) & (b < 120)).astype(np.uint8) * 255
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-
-    n, _, stats, cent = cv2.connectedComponentsWithStats(mask, 8)
-    best = None
-    for i in range(1, n):
-        area = stats[i][4]
-        if area < 1200:
-            continue
-        if best is None or area > best[0]:
-            best = (area, (x0 + int(cent[i][0]), y0 + int(cent[i][1])))
-    return best[1] if best else None
 
 
 def annotate(
