@@ -1,0 +1,13 @@
+# Virtualenv
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Run output: per-reset log and Charm-pack audit screenshots
+logs/
+
+# Sprites extracted from the local Balatro install. Generated artifacts, not
+# source -- regenerate with: python tools/extract_soul_template.py
+assets/

@@ -1,0 +1,49 @@
+{
+  "profile": 1,
+
+  "restart_hold_seconds": 0.95,
+  "poll_interval": 0.05,
+
+  "timeouts": {
+    "new_run": 20.0,
+    "ui_settle": 0.35,
+    "refocus": 120.0,
+    "blind_state_change": 8.0,
+    "pack_ready": 12.0,
+    "soul_resolved": 12.0
+  },
+
+  "_pack_note": "Two separate animations matter here. (1) A pack tears open and materializes cards with a dissolve shader; such a frame has 5 card-sized blobs scoring 0.08-0.22, so blob count alone is not readiness. (2) Every card carries a permanent ambient_tilt that Card:draw recomputes each frame, so even settled cards never hold still -- one slot measured 0.285-0.748 across 40 frames, and detected boxes wandered up to 111px. Hence a MEAN gate (settled 0.60-0.74 vs unsettled ~0.13) plus a per-slot floor above the unsettled ceiling of 0.216. scan_frames is generous because the Soul verdict is taken across every frame sampled.",
+  "pack": {
+    "min_cards": 5,
+    "min_slot_score": 0.25,
+    "min_mean_slot_score": 0.45,
+    "scan_frames": 8,
+    "scan_interval": 0.18
+  },
+
+  "_detector_note": "Scale is derived from window height via card_height_frac, not swept: at 2560x1599 the cards render 1.58x the template's native size. region confines the search to the card row; searching the whole window scored 0.46 on the animated backdrop.",
+  "_threshold_note": "Set from measured data, biased toward recall. Real Soul-free packs scored 0.235/0.271/0.339; the Soul composited into real frames scored 0.722-0.844. 0.55 sits near the midpoint. The asymmetry matters: a missed Soul silently costs ~500 resets, while a false positive just stops the bot with screenshots.",
+  "detector": {
+    "threshold": 0.55,
+    "region": [0.27, 0.57, 0.83, 0.86],
+    "card_height_frac": 0.1882,
+    "scale_tolerance": 0.18,
+    "card_brightness": 175
+  },
+
+  "_coords_note": "Normalized (0..1) positions within the Balatro CLIENT rect, so they survive a resize. Measured live at 2560x1599 via tools/calibrate.py.",
+  "coords": {
+    "skip_small": [0.3735, 0.7647],
+    "skip_big": [0.5661, 0.7647],
+    "pack_skip": [0.7025, 0.8889],
+    "use_button_offset": [0.0, 0.082],
+    "_neutral_note": "Cursor is parked here before reading a pack. The skip_big button sits inside the card row, so leaving the cursor there raises a card and pops a tooltip over its neighbours.",
+    "neutral": [0.9, 0.08]
+  },
+
+  "limits": {
+    "max_resets": 20000,
+    "max_hours": 14.0
+  }
+}
