@@ -46,6 +46,8 @@ from farmer.vision import (  # noqa: E402
 FIXTURES = ROOT / "tests" / "fixtures"
 SETTLED = FIXTURES / "pack_settled.png"        # 5 tarots dealt, no Soul
 UNSETTLED = FIXTURES / "pack_unsettled.png"    # dealt but still materializing
+REAL_SOUL = FIXTURES / "pack_real_soul.png"    # an actual Soul, found live (3TQFEAHP)
+FALSE_POS = FIXTURES / "pack_false_positive.png"  # the trap frame (E7SK3RQA)
 
 EXPECTED_NAMES = ["The Chariot", "The Moon", "The Emperor", "The Hierophant", "Death"]
 
@@ -72,7 +74,7 @@ def paste(frame: np.ndarray, box, art: np.ndarray) -> np.ndarray:
 
 
 def main() -> int:
-    for path in (SETTLED, UNSETTLED):
+    for path in (SETTLED, UNSETTLED, REAL_SOUL, FALSE_POS):
         if not path.exists():
             print(f"missing fixture {path}")
             return 2
@@ -162,6 +164,47 @@ def main() -> int:
     if min(bank_scores) - min(flat_scores) < 0.15:
         failures.append("composite bank is not clearly better than the flat template")
 
+    # -- a REAL Soul, captured live ---------------------------------------
+    # Every positive above is composited. This one is the genuine article.
+    real = cv2.imread(str(REAL_SOUL))
+    r_slots, r_boxes = identify_pack(real, geom)
+    r_max_soul = max((s.soul_score for s in r_slots if s), default=0.0)
+    r_tmpl = (finder.search(real) or type("x", (), {"score": 0.0})).score
+    r_named = [i for i, s in enumerate(r_slots) if s and s.is_soul]
+    print(f"\nREAL Soul (live capture): boxes={len(r_boxes)} "
+          f"named at slot {r_named} max_soul={r_max_soul:.3f} template={r_tmpl:.3f}")
+    if len(r_boxes) != 5:
+        failures.append(f"real Soul frame found {len(r_boxes)} boxes, expected 5")
+    if not r_named:
+        failures.append("real Soul was not named in any slot")
+    if r_max_soul < soul_floor:
+        failures.append(f"real Soul scored {r_max_soul:.3f}, below floor {soul_floor}")
+    if r_tmpl < finder.threshold:
+        failures.append(f"real Soul template {r_tmpl:.3f}, below {finder.threshold}")
+
+    # -- the false positive that stopped a five-hour run -------------------
+    # A merged blob (347x372 where a card is 205x301) misaligned slot 2, everything
+    # there scored ~0.25, and c_soul won on noise by 0.033. The shape filter in
+    # find_card_slots must reject that box, which drops the frame below 5 cards.
+    fp = cv2.imread(str(FALSE_POS))
+    fp_boxes = find_card_slots(fp, geom)
+    fp_slots, _ = identify_pack(fp, geom)
+    fp_max_soul = max((s.soul_score for s in fp_slots if s), default=0.0)
+    fp_tmpl = (finder.search(fp) or type("x", (), {"score": 0.0})).score
+    widths = [b[2] for b in fp_boxes]
+    print(f"\nfalse-positive frame: boxes={len(fp_boxes)} widths={widths} "
+          f"max_soul={fp_max_soul:.3f} template={fp_tmpl:.3f}")
+    if any(w > 1.45 * geom.card_size(fp.shape[0])[0] for w in widths):
+        failures.append(f"an over-wide merged box survived: widths {widths}")
+    if fp_max_soul >= soul_floor:
+        failures.append(f"false positive scored {fp_max_soul:.3f}, at/above the floor")
+    if fp_tmpl >= finder.threshold:
+        failures.append(f"false positive template {fp_tmpl:.3f}, at/above threshold")
+    if len(fp_boxes) >= 5:
+        failures.append(
+            f"false-positive frame still yields {len(fp_boxes)} boxes; it must fall "
+            "below 5 so the frame cannot nominate a Soul")
+
     # -- readiness gate ---------------------------------------------------
     MIN_SLOT = float(pack_cfg["min_slot_score"])
     MIN_MEAN = float(pack_cfg["min_mean_slot_score"])
@@ -180,7 +223,7 @@ def main() -> int:
     print(f"  settled    mean={avg_s:.3f} min={low_s:.3f} -> {'PASS' if ok_s else 'REJECT'}")
     print(f"  unsettled  mean={avg_u:.3f} min={low_u:.3f} -> {'PASS' if ok_u else 'REJECT'}")
     print(f"  count_cards: settled={count_cards(settled, geom)} "
-          f"unsettled={count_cards(unsettled, geom)} (both 5 -- count alone is not enough)")
+          f"unsettled={count_cards(unsettled, geom)}")
     if not ok_s:
         failures.append(f"settled pack (mean {avg_s:.3f}) would be rejected")
     if ok_u:

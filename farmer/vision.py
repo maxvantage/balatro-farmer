@@ -201,8 +201,18 @@ def find_card_slots(
     boxes = []
     for i in range(1, n):
         x, y, w, h, area = stats[i]
-        if 0.35 * expected <= area <= 2.2 * expected and h > 0.55 * card_h:
-            boxes.append((x0 + int(x), y0 + int(y), int(w), int(h)))
+        # Constrain the box *shape*, not just its area. Filtering on area and height
+        # alone let a merged blob through as a card -- one measured 347x372 where a
+        # card is 205x301. The crop was then misaligned, every candidate scored ~0.25,
+        # and c_soul won that slot on noise by a margin of 0.033: a false Soul that
+        # stopped a five-hour run. A card's silhouette is a known shape; use it.
+        if not 0.55 * card_w <= w <= 1.45 * card_w:
+            continue
+        if not 0.6 * card_h <= h <= 1.4 * card_h:
+            continue
+        if not 0.35 * expected <= area <= 1.6 * expected:
+            continue
+        boxes.append((x0 + int(x), y0 + int(y), int(w), int(h)))
     return sorted(boxes, key=lambda b: b[0])
 
 

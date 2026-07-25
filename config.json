@@ -19,7 +19,8 @@
   "_pack_note": "Two separate animations matter here. (1) A pack tears open and materializes cards with a dissolve shader; such a frame has 5 card-sized blobs scoring 0.08-0.22, so blob count alone is not readiness. (2) Every card carries a permanent ambient_tilt that Card:draw recomputes each frame, so even settled cards never hold still -- one slot measured 0.285-0.748 across 40 frames, and detected boxes wandered up to 111px. Hence a MEAN gate (settled 0.60-0.74 vs unsettled ~0.13) plus a per-slot floor above the unsettled ceiling of 0.216. scan_frames is generous because the Soul verdict is taken across every frame sampled.",
   "pack": {
     "min_cards": 5,
-    "min_slot_score": 0.25,
+    "_min_slot_note": "Raised 0.25 -> 0.45 after a misaligned slot scored 0.251 and passed the gate. Across 385 real Soul-free packs the worst slot was 0.575 at the 1st percentile, so 0.45 keeps ample margin while rejecting a degenerate read.",
+    "min_slot_score": 0.45,
     "min_mean_slot_score": 0.45,
     "scan_frames": 8,
     "scan_interval": 0.18

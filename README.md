@@ -248,15 +248,39 @@ afterwards.
 
 ## Results so far
 
-First real run: **1,561 resets over ~3 hours, 199 Charm packs, 2 Souls** — which
-rolled Perkeo and Triboulet, both already owned (each Soul is 1-in-5 for Yorick, so
-missing twice is a 64% outcome). Charm rate 12.7% against a 12.9% prediction.
+| | resets | Charm packs | Souls | rolled |
+|---|---|---|---|---|
+| Run 1 (~3 h) | 1,561 | 199 | 2 | Perkeo, Triboulet |
+| Run 2 (5.9 h) | 3,269 | 389 | 4 | Canio, Perkeo, Chicot, Perkeo |
 
-That run also produced the evidence for every fix above: the two-layer Soul sprite,
-and the discovery that **every single skip click was retrying** — all 298 of them,
-always succeeding on the second attempt. Measurement showed why: a skip takes
-**3.7–4.2 s** to reach `save.jkr` (the tag animation blocks the event queue before
-`save_run` fires), and the confirmation timeout was simply shorter than that.
+Charm rate 12.7% against a 12.9% prediction; ~554 resets/hour. Six Souls, no Yorick
+— each is 1-in-5, so this is a 26% outcome. Still 149/150.
+
+Run 1 produced the two-layer Soul sprite discovery, and the finding that **every
+skip click was retrying** — all 298 of them, always succeeding on the second
+attempt. A skip takes a measured **3.7–4.2 s** to reach `save.jkr` (the tag
+animation blocks the event queue before `save_run` fires); the timeout was simply
+shorter than that.
+
+Run 2 ended on a **false positive**, and the mechanism is worth recording. A merged
+brightness blob — 347×372 where a card is 205×301 — passed `find_card_slots`, which
+filtered on area and height but never width. The misaligned crop made every
+candidate in that slot score ~0.25, and `c_soul` won it on noise by a margin of
+0.033. The bot claimed a Soul, failed to use it, and stopped rather than continue in
+an unknown state. Two fixes: `find_card_slots` now constrains box *shape*, and
+winning a slot outright no longer triggers on its own.
+
+That last point is the useful lesson. Over 389 real packs:
+
+| signal | fired on 385 Soul-free packs | fired on 4 real Souls |
+|---|---|---|
+| absolute Soul score | **0** (ceiling 0.375, floor 0.60) | 4/4 (0.831–0.878) |
+| sliding template | **0** | 4/4 (0.767–0.813) |
+| slot argmax | **1** ← the false positive | 4/4 |
+
+argmax caught nothing the other two missed and was the only source of false
+positives, so it is now recorded for audit but does not trigger. A redundant signal
+that only adds false positives is not a safety net.
 
 ## Safety notes
 

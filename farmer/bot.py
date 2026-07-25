@@ -468,10 +468,11 @@ class Farmer:
             # not a frame we should trust to spot the Soul.
             if not self._legible(scan):
                 return
-            candidate = scan.soul_slot is not None or scan.max_soul_score >= soul_floor
-            if candidate and (
-                soul_scan is None or scan.max_soul_score > soul_scan.max_soul_score
-            ):
+            # Keep the legible frame with the strongest Soul correlation, whether or
+            # not it clears the floor. Tracking only frames already over the floor
+            # meant one frame's misaligned slot could hide a Soul that read fine in
+            # another, and it left the logged number meaningless on negatives.
+            if soul_scan is None or scan.max_soul_score > soul_scan.max_soul_score:
                 soul_scan = scan
 
         deadline = time.time() + timeout
@@ -711,18 +712,23 @@ class Farmer:
         cleanest, soul_scan, frames = self.scan_pack()
         scan = soul_scan or cleanest
 
-        # Three signals, any of which is enough (a false positive merely halts the
-        # bot; a miss silently costs ~500 resets):
-        #   name     - the Soul won its slot outright against the other 22 candidates
-        #   score    - Soul correlation cleared an absolute floor (tarots <=0.35,
-        #              a real Soul >=0.87)
+        # Two signals decide, either being enough:
+        #   score    - Soul correlation clears an absolute floor
         #   template - independent sliding search, run only on candidates
+        #
+        # Winning a slot outright (argmax) is recorded but deliberately does NOT
+        # trigger on its own. Measured over 389 real packs: by_score fired 0/385
+        # times on Soul-free packs and 4/4 on real Souls (0.831-0.878 vs a 0.375
+        # ceiling); by_template likewise. argmax was the *only* signal that ever
+        # fired falsely -- once, on a misaligned slot where everything scored ~0.25
+        # and the Soul won by 0.033 -- and it caught nothing the other two missed.
+        # A redundant signal that only adds false positives is not a safety net.
         soul_floor = float(self.cfg["detector"]["soul_score_threshold"])
         by_name = scan.soul_slot is not None
         by_score = scan.max_soul_score >= soul_floor
         by_template = scan.template_score >= self.finder.threshold
-        soul = by_name or by_score or by_template
-        # Flag when the cards were unsettled, or when the two cheap signals split.
+        soul = by_score or by_template
+        # Flag a disagreement so a near-miss still gets logged for a human look.
         suspicious = (not cleanest.ready) or (by_name != by_score)
 
         self.stats.cards_seen.extend(
