@@ -11,3 +11,7 @@ logs/
 # Sprites extracted from the local Balatro install. Generated artifacts, not
 # source -- regenerate with: python tools/extract_soul_template.py
 assets/
+
+# Frames of actual Souls found. Kept out of logs/ so clearing logs cannot
+# destroy them; they are the rarest evidence this project produces.
+souls/

@@ -191,6 +191,23 @@ so a bug can never quietly swallow a Soul without leaving a record.
 
 Disk: measured **~202 KB per pack**, so a full hunt lands near **80 MB**.
 
+### Clearing logs between runs
+
+`logs/` is bulk output and safe to delete — the bot recreates it on startup:
+
+```bash
+rmdir /s /q logs
+```
+
+Frames of an **actual Soul** are written to `souls/` instead, deliberately outside
+`logs/`. They are the rarest artefact this project produces (two in three hours) and
+were the only reason the two-sprite render bug was ever diagnosed, so a routine log
+clear must not be able to destroy them. To archive a run instead of discarding it:
+
+```bash
+move logs logs_run1
+```
+
 ## Calibration
 
 `config.json` stores click points as normalized (0..1) positions inside the

@@ -49,6 +49,11 @@ from .window import BalatroWindow, Rect, WindowNotFound
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
 PACK_DIR = LOG_DIR / "packs"
+# Soul evidence lives OUTSIDE logs/ on purpose. Routine pack shots are bulk and get
+# cleared between runs; frames of an actual Soul are rare, hard-won, and were the
+# only reason the two-sprite render bug was ever diagnosed. Clearing logs must not
+# be able to destroy them.
+SOUL_DIR = ROOT / "souls"
 
 LEGENDARIES = ("j_caino", "j_triboulet", "j_yorick", "j_chicot", "j_perkeo")
 # Canio's internal key really is "j_caino" -- a typo in the game's own source.
@@ -212,6 +217,7 @@ class Farmer:
         self.finder = SoulFinder(self.geometry, threshold=float(det["threshold"]))
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         PACK_DIR.mkdir(parents=True, exist_ok=True)
+        SOUL_DIR.mkdir(parents=True, exist_ok=True)
         self.log_path = LOG_DIR / "run.jsonl"
 
     # -- infrastructure ---------------------------------------------------
@@ -509,7 +515,7 @@ class Farmer:
         if full_res:
             # Keep an unannotated copy too: the overlays draw over the cards, which
             # would spoil the frame as evidence (and as a future template source).
-            cv2.imwrite(str(PACK_DIR / f"{seed}_clean.png"), scan.frame)
+            cv2.imwrite(str(SOUL_DIR / f"{seed}_clean.png"), scan.frame)
 
         marked = annotate(
             scan.frame, scan.match, label=seed, geometry=self.geometry
@@ -553,11 +559,11 @@ class Farmer:
         cx, cy = point
         click_screen(cx, cy, rect)
         time.sleep(0.45)
-        cv2.imwrite(str(PACK_DIR / f"{seed}_selected.png"), grab(rect))
+        cv2.imwrite(str(SOUL_DIR / f"{seed}_selected.png"), grab(rect))
 
         self._click_use(rect, cx, cy)
         time.sleep(0.6)
-        cv2.imwrite(str(PACK_DIR / f"{seed}_used.png"), grab(rect))
+        cv2.imwrite(str(SOUL_DIR / f"{seed}_used.png"), grab(rect))
 
         timeout = float(self.cfg["timeouts"]["soul_resolved"])
         pack_skip = self.cfg.coord("pack_skip")
@@ -783,7 +789,7 @@ class Farmer:
             # The Soul was almost certainly consumed but we could not confirm the
             # result. Stopping beats silently farming on with an unknown state.
             print(f"        !! used the Soul but could not confirm the result.")
-            print(f"        !! see {shot} and {PACK_DIR / (state.seed + '_used.png')}")
+            print(f"        !! see {shot} and {SOUL_DIR / (state.seed + '_used.png')}")
             return 2
 
         pretty = ", ".join(PRETTY.get(k, k) for k in rolled) or "unknown"
