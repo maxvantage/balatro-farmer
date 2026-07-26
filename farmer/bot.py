@@ -41,6 +41,7 @@ from .vision import (
     PackGeometry,
     SoulFinder,
     annotate,
+    count_cards,
     grab,
     identify_pack,
 )
@@ -544,17 +545,37 @@ class Farmer:
         """Click The Soul, Use it, and confirm what came out.
 
         Selecting a pack card raises it and puts a small red USE button at its
-        lower edge. That button is located by colour rather than clicked at a fixed
-        offset -- this is the one moment in the whole run that has to work, since a
-        fumbled Soul costs roughly 500 resets to see another.
+        lower edge. This is the one moment in the whole run that has to work, since
+        a fumbled Soul costs roughly 500 resets to see another.
 
-        Confirmation leans on ``meta.jkr`` rather than ``save.jkr``. A Mega Arcana
-        Pack is "Choose 2", so the pack stays open after the Soul is used and
-        ``save_run()`` does not fire -- but ``discover_card`` calls
-        ``save_progress()`` immediately, so a newly discovered Joker lands in
-        ``meta.jkr`` right away. The pack is closed partway through the wait to
-        force a run save too, which is what tells us *which* Legendary we got when
-        it is one already discovered.
+        **Using the Soul ends the entire pack.** A Mega Arcana Pack says "Choose 2",
+        which had suggested the pack stays open for a second pick -- it does not.
+        Measured on all 18 Souls of the 14h run: 0.6s after the USE click the card
+        row is empty, the pack banner is gone, the new Joker is already in its slot
+        and the screen is back at blind select. ``count_cards`` reads 5 on every
+        pre-use frame and 0 on every post-use frame, so "did the USE take?" is a
+        direct observation, not a timer.
+
+        That matters because the old code guessed. It re-selected the card and
+        re-clicked USE on a fixed 5.5s timer, and that timer fired on 18/18 Souls
+        -- by then the pack was long gone, so those clicks landed on the live
+        blind-select screen roughly where the blind panels sit. One of them started
+        a blind, *that* fired ``save_run()``, and the resulting save is what the
+        loop then read as its answer 4-5s later. The confirmation worked by
+        accident, off a stray click into a running game.
+
+        Note what this means for the obvious fix: simply raising ``use_retry``
+        above the old 8s pack-close would have removed the only thing producing a
+        save. Every future Soul would have timed out unresolved and stopped the bot.
+
+        So confirmation now reads files and sends no further input:
+
+        * **the target** lands in ``meta.jkr`` almost at once -- ``discover_card``
+          queues ``save_progress()`` on the next event tick, and this is the win
+          condition, the only outcome that has to be detected.
+        * **any other Legendary** is telemetry. It shows up if and when the run
+          saves on its own; if it never does, the roll is still known not to be the
+          target, which is all the loop needs to keep farming.
         """
         rect = self.rect()
         cx, cy = point
@@ -563,17 +584,33 @@ class Farmer:
         cv2.imwrite(str(SOUL_DIR / f"{seed}_selected.png"), grab(rect))
 
         self._click_use(rect, cx, cy)
-        time.sleep(0.6)
-        cv2.imwrite(str(SOUL_DIR / f"{seed}_used.png"), grab(rect))
+        used = self._await_use(rect, seed)
+        if not used:
+            # The pack looks like it is still open, so the Soul may not have been
+            # consumed. The card should still be selected and its USE button still on
+            # screen, so clicking that button again is the whole rescue -- deliberately
+            # NOT re-clicking the card, which would either deselect it or, once the
+            # Soul is gone, select and burn a different card.
+            self.log(event="use_retry", seed=seed)
+            self._click_use(rect, cx, cy)
+            used = self._await_use(rect, seed, shot="used_retry")
 
-        timeout = float(self.cfg["timeouts"]["soul_resolved"])
-        pack_skip = self.cfg.coord("pack_skip")
-        started = time.time()
-        retried_use = False
-        closed_pack = False
-        jokers: tuple[str, ...] = ()
+        if not used:
+            # Close whatever is on screen -- a no-op if no pack is there -- and then
+            # fall through to the file reads anyway rather than giving up here. All 18
+            # Souls of the 14h run read 0 cards on the very first check, so a "still
+            # open" verdict is far more likely to be this check being fooled (blind
+            # panels sit in the same region once they animate in) than a genuinely
+            # unused Soul. Stopping an unattended overnight run on that would be the
+            # expensive way to be wrong; the files get the final say.
+            self.log(event="use_unconfirmed", seed=seed)
+            pack_skip = self.cfg.coord("pack_skip")
+            if pack_skip is not None:
+                self.click_norm(*pack_skip)
 
-        while time.time() - started < timeout:
+        # The Soul is spent. From here on this is a file read, never a click.
+        deadline = time.time() + float(self.cfg["timeouts"]["soul_resolved"])
+        while time.time() < deadline:
             if panic_pressed():
                 raise PanicAbort("panic key (F12) pressed")
             if self.meta.has_target(self.target):
@@ -582,26 +619,38 @@ class Farmer:
             state = self.save.read()
             if state is not None and state.joker_keys:
                 return SoulOutcome(False, state.joker_keys, True)
-
-            elapsed = time.time() - started
-            # Retry only after the save could plausibly have landed. Firing at 2s
-            # meant every single Soul logged a spurious retry, because a run save
-            # takes ~4s to appear. The card is re-selected first in case the original
-            # selection was what failed.
-            if not retried_use and elapsed > float(self.cfg["timeouts"]["use_retry"]):
-                self.log(event="use_retry", seed=seed)
-                click_screen(cx, cy, rect)
-                time.sleep(0.4)
-                self._click_use(rect, cx, cy)
-                retried_use = True
-            # Closing the pack forces save_run(), which reveals the new Joker even
-            # when it is one already discovered.
-            elif not closed_pack and pack_skip is not None and elapsed > 8.0:
-                self.click_norm(*pack_skip)
-                closed_pack = True
             time.sleep(float(self.cfg["poll_interval"]))
 
-        return SoulOutcome(self.meta.has_target(self.target), jokers, False)
+        # Nothing in either file. If the pack was seen to close, the roll simply was
+        # not the target and which Legendary it was is only a log line -- keep going.
+        # If it never closed, the Soul may have been wasted, which is worth stopping
+        # for: at ~500 resets each, a broken USE click should not burn the night.
+        return SoulOutcome(False, (), used)
+
+    def _await_use(self, rect: Rect, seed: str, shot: str = "used") -> bool:
+        """Whether the pack has gone away, i.e. the USE click was registered.
+
+        The first frame is kept as an audit shot, at the same 0.6s offset the old
+        code used, so that evidence stays comparable across runs. The retry attempt
+        writes a separate name: the frame showing the pack *still open* is the whole
+        record of why a retry was needed, and must not be overwritten by it.
+        """
+        timeout = float(self.cfg["timeouts"]["use_confirm"])
+        time.sleep(0.6)
+        deadline = time.time() + timeout
+        first = True
+        while True:
+            if panic_pressed():
+                raise PanicAbort("panic key (F12) pressed")
+            frame = grab(rect)
+            if first:
+                cv2.imwrite(str(SOUL_DIR / f"{seed}_{shot}.png"), frame)
+                first = False
+            if count_cards(frame, self.geometry) == 0:
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.15)
 
     def _click_use(self, rect: Rect, cx: int, cy: int) -> None:
         """Click the USE button, at a fixed offset below the selected card.
@@ -792,14 +841,17 @@ class Farmer:
             return 0
 
         if not outcome.resolved:
-            # The Soul was almost certainly consumed but we could not confirm the
-            # result. Stopping beats silently farming on with an unknown state.
-            print(f"        !! used the Soul but could not confirm the result.")
+            # The pack never went away, so the Soul was NOT consumed -- the USE click
+            # missed twice. Stopping beats farming on past a wasted Soul, because at
+            # ~500 resets each the click is worth fixing before spending more hours.
+            print(f"        !! the pack stayed open: the Soul was not used.")
             print(f"        !! see {shot} and {SOUL_DIR / (state.seed + '_used.png')}")
             return 2
 
-        pretty = ", ".join(PRETTY.get(k, k) for k in rolled) or "unknown"
-        print(f"        rolled: {pretty} (not the target) -- continuing")
+        pretty = ", ".join(PRETTY.get(k, k) for k in rolled)
+        print(f"        rolled: {pretty} (not the target) -- continuing" if pretty
+              else "        rolled a Legendary, but not the target"
+                   " (the run never saved, so which one is unknown) -- continuing")
         return None
 
 

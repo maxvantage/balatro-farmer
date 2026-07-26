@@ -12,7 +12,9 @@
     "skip_confirm": 9.0,
     "blind_state_change": 9.0,
     "pack_ready": 12.0,
-    "use_retry": 5.5,
+    "_use_confirm_note": "Using the Soul ends the whole pack: across all 18 Souls of the 14h run the card row was already empty 0.6s after the USE click (count_cards 5 -> 0, never anything between). So the USE is confirmed by watching the pack disappear rather than on a timer, and 2.5s is ~4x the observed margin.",
+    "use_confirm": 2.5,
+    "_soul_resolved_note": "Only the target has to be detected, and it arrives fast: discover_card queues save_progress() on the next event tick, so a newly discovered Joker is in meta.jkr well inside a second. This longer window is for the telemetry case -- naming an already-discovered Legendary needs a run save, which the pack close does NOT fire. If soul_used keeps logging empty jokers, that is why; it costs nothing but the log line.",
     "soul_resolved": 16.0
   },
 

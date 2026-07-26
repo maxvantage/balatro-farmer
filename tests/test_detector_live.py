@@ -48,6 +48,7 @@ SETTLED = FIXTURES / "pack_settled.png"        # 5 tarots dealt, no Soul
 UNSETTLED = FIXTURES / "pack_unsettled.png"    # dealt but still materializing
 REAL_SOUL = FIXTURES / "pack_real_soul.png"    # an actual Soul, found live (3TQFEAHP)
 FALSE_POS = FIXTURES / "pack_false_positive.png"  # the trap frame (E7SK3RQA)
+USED = FIXTURES / "pack_used.png"              # 0.6s after using a Soul (YWTNUSTK)
 
 EXPECTED_NAMES = ["The Chariot", "The Moon", "The Emperor", "The Hierophant", "Death"]
 
@@ -74,7 +75,7 @@ def paste(frame: np.ndarray, box, art: np.ndarray) -> np.ndarray:
 
 
 def main() -> int:
-    for path in (SETTLED, UNSETTLED, REAL_SOUL, FALSE_POS):
+    for path in (SETTLED, UNSETTLED, REAL_SOUL, FALSE_POS, USED):
         if not path.exists():
             print(f"missing fixture {path}")
             return 2
@@ -231,6 +232,24 @@ def main() -> int:
     if avg_s - avg_u < 0.25:
         failures.append(f"gate separation only {avg_s-avg_u:.3f}")
 
+    # -- the USE confirmation ---------------------------------------------
+    # take_soul decides "the Soul was consumed" from the pack row emptying out,
+    # having previously guessed it on a 5.5s timer that fired on 18/18 Souls and
+    # sent two stray clicks into a live blind-select screen. Using the Soul ends
+    # the whole pack despite the "Choose 2" label, so the row goes 5 -> 0. Both
+    # ends of that need to hold, or the confirmation silently inverts: a frame
+    # still showing cards would read as used, and the real Soul would be lost.
+    used = cv2.imread(str(USED))
+    n_used = count_cards(used, geom)
+    n_open = count_cards(settled, geom)
+    print(f"\nUSE confirmation: open pack -> {n_open} cards, "
+          f"0.6s after use -> {n_used} cards")
+    if n_used != 0:
+        failures.append(f"post-use frame still shows {n_used} cards; the USE "
+                        "confirmation would never fire")
+    if n_open == 0:
+        failures.append("an open pack reads as 0 cards; the USE confirmation "
+                        "would fire before the Soul is taken")
 
     print("\n" + "-" * 56)
     if failures:

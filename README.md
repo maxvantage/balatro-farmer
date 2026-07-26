@@ -252,9 +252,30 @@ afterwards.
 |---|---|---|---|---|
 | Run 1 (~3 h) | 1,561 | 199 | 2 | Perkeo, Triboulet |
 | Run 2 (5.9 h) | 3,269 | 389 | 4 | Canio, Perkeo, Chicot, Perkeo |
+| Run 3 (13.9 h) | 7,742 | 946 | 18 | Canio ×5, Triboulet ×5, Chicot ×5, Perkeo ×3 |
 
-Charm rate 12.7% against a 12.9% prediction; ~554 resets/hour. Six Souls, no Yorick
-— each is 1-in-5, so this is a 26% outcome. Still 149/150.
+Charm rate 12.2% against a 12.9% prediction; ~556 resets/hour. 24 Souls, **no
+Yorick**. Each is 1-in-5, so 0 in 24 is a 0.8²⁴ = 4.7% outcome (run 3 alone, 0 in
+18, is 1.8%). Still 149/150.
+
+Run 3's detector record was perfect: an independent reimplementation of Balatro's
+own RNG says exactly 18 of those 946 packs contained a Soul, and they are the same
+18 the vision pipeline found — no misses, no false positives.
+
+### Why it is only ever 1-in-5
+
+Worth recording, because the profile makes it look otherwise. Yorick is the single
+joker of 150 missing from `unlocked` in `meta.jkr`, which reads like the smoking gun
+for "it can never spawn". It is not: `get_current_pool` culls on
+`(v.unlocked ~= false or v.rarity == 4)`, and Legendaries are rarity 4, so the lock
+is bypassed. All five are structurally identical in `game.lua` (orders 146–150).
+
+The roll is `pseudorandom_element(pool, pseudoseed('Joker4'))` — deterministic in the
+run seed. Reimplementing `pseudohash`, `pseudoseed` and LuaJIT's Tausworthe
+`math.random` reproduces all 18 recorded outcomes exactly, and a 1.5M-seed sweep puts
+Yorick at 19.9%. Both draws share `hashed_seed`, so the conditional case was checked
+too: given a Soul in the pack, Yorick is 19.7% (χ²=3.22, 4 df, p≈0.52). No bias.
+There is nothing to fix; it is variance.
 
 Run 1 produced the two-layer Soul sprite discovery, and the finding that **every
 skip click was retrying** — all 298 of them, always succeeding on the second
@@ -281,6 +302,35 @@ That last point is the useful lesson. Over 389 real packs:
 argmax caught nothing the other two missed and was the only source of false
 positives, so it is now recorded for audit but does not trigger. A redundant signal
 that only adds false positives is not a safety net.
+
+Run 3 found that **the Soul confirmation had been working by accident.** `use_retry`
+fired on 18 Souls out of 18 — the same "the retry is the normal path" smell as run 1,
+but with a worse cause. Using the Soul ends the *whole* pack despite the "Choose 2"
+label: 0.6s after the USE click the card row is empty, the Joker is in its slot and
+the screen is back at blind select (`count_cards` reads 5 on every pre-use frame and
+0 on every post-use frame, across all 18). Closing the pack does not fire
+`save_run()`, so `save.jkr` never revealed the Joker on its own — and the 5.5s retry
+was therefore guaranteed to fire, re-clicking the card position *on the live
+blind-select screen*, roughly where the blind panels sit. One of those clicks started
+a blind, which fired `save_run()`, which produced the answer 4–5s later. Every
+resolution in the run came out of a stray click into a running game.
+
+The trap: raising `use_retry` above the 8s pack-close — the obvious reading of "the
+retry timer is too short" — would have removed the only thing producing a save, and
+every future Soul would have timed out unresolved and stopped the bot. So the timer
+is gone instead. The USE is confirmed by watching the pack disappear, the retry
+re-clicks only the button (never the card, which would burn a different one), and
+nothing is clicked after the Soul is spent: the target arrives in `meta.jkr` within a
+frame via `discover_card` → `save_progress()`, and naming a non-target Legendary is
+telemetry not worth clicking blind for.
+
+### Not moving to a seed filter
+
+The roll being deterministic in the run seed means the bot *could* read `save.jkr` at
+blind select, predict both the Soul and the Legendary, and only ever open a pack that
+is a guaranteed Yorick — about 3.8 h expected instead of unbounded variance. That is
+deliberately not implemented. It is lookahead into the RNG rather than automation of
+play, which is the line this project does not cross.
 
 ## Safety notes
 
