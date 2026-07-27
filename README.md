@@ -246,21 +246,33 @@ The threshold is biased toward recall on purpose: a missed Soul silently costs
 Charm pack is saved to `logs/packs/` so the whole run can be audited by eye
 afterwards.
 
-## Results so far
+## Results: done — 150/150
+
+**Yorick landed on the 33rd Soul**, seed `16ERTR3N`, 2026-07-26 04:26 local.
 
 | | resets | Charm packs | Souls | rolled |
 |---|---|---|---|---|
 | Run 1 (~3 h) | 1,561 | 199 | 2 | Perkeo, Triboulet |
 | Run 2 (5.9 h) | 3,269 | 389 | 4 | Canio, Perkeo, Chicot, Perkeo |
 | Run 3 (13.9 h) | 7,742 | 946 | 18 | Canio ×5, Triboulet ×5, Chicot ×5, Perkeo ×3 |
+| Run 4 (4.7 h) | 2,547 | 332 | 9 | Canio ×3, Chicot ×3, Perkeo ×2, **Yorick** |
+| **total (27.5 h)** | **15,119** | **1,866** | **33** | Canio 9, Chicot 9, Perkeo 8, Triboulet 6, Yorick 1 |
 
-Charm rate 12.2% against a 12.9% prediction; ~556 resets/hour. 24 Souls, **no
-Yorick**. Each is 1-in-5, so 0 in 24 is a 0.8²⁴ = 4.7% outcome (run 3 alone, 0 in
-18, is 1.8%). Still 149/150.
+The runs are one hunt; they were only split to check on progress. 550 resets/hour,
+one every 6.5 s. Charm rate 12.34% against a 12.9% prediction. A Soul in 1.77% of
+packs (1 in 57), i.e. 1 per 458 resets — 9,330 tarots read to find 33.
 
-Run 3's detector record was perfect: an independent reimplementation of Balatro's
-own RNG says exactly 18 of those 946 packs contained a Soul, and they are the same
-18 the vision pipeline found — no misses, no false positives.
+Each Soul is an even 1-in-5, so 32 straight misses before the hit is a
+0.8³² = **0.079%** outcome, about 1 in 1,262. Five Souls is the fair price for one
+named Legendary; this cost 33.
+
+**In its final form the detector went 27 for 27 with no false positives** — every
+Soul in runs 3 and 4. Verified independently rather than on its own say-so: a
+reimplementation of Balatro's RNG (below) names exactly which packs hold a Soul, and
+it agrees with the vision pipeline on all **1,278** of those packs, no misses and no
+false alarms. Runs 1–2 predate the shape fix (run 2 ended on the false positive
+described below) and their logs have since been rotated away, so those 6 Souls are
+not cross-checkable.
 
 ### Why it is only ever 1-in-5
 
@@ -272,8 +284,9 @@ is bypassed. All five are structurally identical in `game.lua` (orders 146–150
 
 The roll is `pseudorandom_element(pool, pseudoseed('Joker4'))` — deterministic in the
 run seed. Reimplementing `pseudohash`, `pseudoseed` and LuaJIT's Tausworthe
-`math.random` reproduces all 18 recorded outcomes exactly, and a 1.5M-seed sweep puts
-Yorick at 19.9%. Both draws share `hashed_seed`, so the conditional case was checked
+`math.random` reproduces **all 19 outcomes that have ground truth** exactly (run 3's
+18, plus calling the winning seed `16ERTR3N` as Yorick before `meta.jkr` was read),
+and a 1.5M-seed sweep puts Yorick at 19.9%. Both draws share `hashed_seed`, so the conditional case was checked
 too: given a Soul in the pack, Yorick is 19.7% (χ²=3.22, 4 df, p≈0.52). No bias.
 There is nothing to fix; it is variance.
 
@@ -323,6 +336,14 @@ re-clicks only the button (never the card, which would burn a different one), an
 nothing is clicked after the Soul is spent: the target arrives in `meta.jkr` within a
 frame via `discover_card` → `save_progress()`, and naming a non-target Legendary is
 telemetry not worth clicking blind for.
+
+Run 4 confirmed both halves of that. `use_retry` fired **0 times in 9 Souls** (against
+18 of 18 before), so no stray click ever entered a live run. And every `soul_used`
+logged `jokers: []`, which is the predicted consequence: with nothing clicked after
+the Soul is spent, `save_run()` never fires and the non-target names are genuinely
+unavailable from the save. Those 8 names were recovered afterwards from the RNG model
+instead — which is what the `jokers: []` entries in `logs/run.jsonl` mean, rather than
+a failure.
 
 ### Not moving to a seed filter
 
