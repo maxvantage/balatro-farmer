@@ -250,6 +250,9 @@ afterwards.
 
 **Yorick landed on the 33rd Soul**, seed `16ERTR3N`, 2026-07-26 04:26 local.
 
+📊 **[Read the illustrated report →](https://maxvantage.github.io/balatro-farmer/)**
+(source in [`docs/index.html`](docs/index.html))
+
 | | resets | Charm packs | Souls | rolled |
 |---|---|---|---|---|
 | Run 1 (~3 h) | 1,561 | 199 | 2 | Perkeo, Triboulet |
